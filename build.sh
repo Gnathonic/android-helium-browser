@@ -4,8 +4,8 @@ set_keys
 export VERSION=$(grep -m1 -o '[0-9]\+\(\.[0-9]\+\)\{3\}' vanadium/args.gn)
 export CHROMIUM_SOURCE=https://chromium.googlesource.com/chromium/src.git # https://github.com/chromium/chromium.git
 export DEBIAN_FRONTEND=noninteractive
-sudo apt update
-sudo apt install -y sudo lsb-release file nano git curl python3 python3-pillow
+sudo apt-get update
+sudo apt-get install -y sudo lsb-release file nano git curl python3 python3-pillow
 
 # https://github.com/uazo/cromite/blob/master/tools/images/chr-source/prepare-build.sh
 git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
@@ -116,6 +116,7 @@ autoninja -C out/Default chrome_public_apk
 mkdir -p out/tmp out/release
 mv $(find out/Default/apks -name 'Chrome*.apk') out/tmp/$VERSION-arm64-v8a.apk
 
+sudo dpkg --add-architecture i386; sudo apt-get update; sudo apt-get install -y libgcc-s1:i386  
 sed -i 's/target_cpu = "arm64"/target_cpu = "arm"/' out/Default/args.gn
 autoninja -C out/Default chrome_public_apk
 mv $(find out/Default/apks -name 'Chrome*.apk') out/tmp/$VERSION-armeabi-v7a.apk
