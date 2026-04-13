@@ -54,6 +54,63 @@ rm -rf third_party/angle/third_party/VK-GL-CTS/
 # python3 "${SCRIPT_DIR}/helium/utils/generate_resources.py" "${SCRIPT_DIR}/helium/resources/generate_resources.txt" "${SCRIPT_DIR}/helium/resources"
 # python3 "${SCRIPT_DIR}/helium/utils/replace_resources.py" "${SCRIPT_DIR}/helium/resources/helium_resources.txt" "${SCRIPT_DIR}/helium/resources" .
 
+# === Migaku popup-to-tab conversion + lifecycle exemption ===
+
+# 1. Force popups to open as tabs (render_frame_impl.cc)
+#    Replace the popup case to always return NEW_FOREGROUND_TAB
+sed -i '/case blink::kWebNavigationPolicyNewPopup:/{
+  n
+  s/.*return WindowOpenDisposition::NEW_POPUP;/      return WindowOpenDisposition::NEW_FOREGROUND_TAB;/
+}' content/renderer/render_frame_impl.cc
+
+# 2. Force popups to tabs in mojo serialization (browser side)
+#    Serializer: NEW_POPUP -> NEW_FOREGROUND_TAB
+sed -i '/case WindowOpenDisposition::NEW_POPUP:/{
+  n
+  s/.*return ui::mojom::WindowOpenDisposition::NEW_POPUP;/        return ui::mojom::WindowOpenDisposition::NEW_FOREGROUND_TAB;/
+}' ui/base/mojom/window_open_disposition_mojom_traits.h
+
+#    Deserializer: NEW_POPUP -> NEW_FOREGROUND_TAB
+sed -i 's/\*out = WindowOpenDisposition::NEW_POPUP;/*out = WindowOpenDisposition::NEW_FOREGROUND_TAB;/' \
+  ui/base/mojom/window_open_disposition_mojom_traits.h
+
+# 3. Mark converted popup tabs as non-auto-discardable (browser.cc)
+#    Add include for PageLiveStateDecorator
+sed -i '/#include "chrome\/browser\/ui\/browser.h"/a #include "components/performance_manager/public/decorators/page_live_state_decorator.h"' \
+  chrome/browser/ui/browser.cc
+
+#    In AddNewContents, detect converted popups and exempt from lifecycle
+sed -i '/bool\* was_blocked) {/{
+  a\  // Migaku: exempt converted popup tabs from freezing/discarding\
+  if (window_features.is_popup \&\&\
+      disposition != WindowOpenDisposition::NEW_POPUP) {\
+    performance_manager::PageLiveStateDecorator::SetIsAutoDiscardable(\
+        new_contents.get(), false);\
+  }
+}' chrome/browser/ui/browser.cc
+
+# 4. Make FreezingPolicy respect IsAutoDiscardable (freezing_policy.h)
+#    Add OnIsAutoDiscardableChanged override declaration
+sed -i '/void OnIsBeingMirroredChanged(const PageNode\* page_node) override;/a\  void OnIsAutoDiscardableChanged(const PageNode* page_node) override;' \
+  components/performance_manager/freezing/freezing_policy.h
+
+# 5. Implement OnIsAutoDiscardableChanged in FreezingPolicy (freezing_policy.cc)
+#    Add implementation after OnIsBeingMirroredChanged
+sed -i '/^void FreezingPolicy::OnIsBeingMirroredChanged/,/^}$/{
+  /^}$/a\
+\
+void FreezingPolicy::OnIsAutoDiscardableChanged(const PageNode* page_node) {\
+  auto* live_state_data =\
+      PageLiveStateDecorator::Data::FromPageNode(page_node);\
+  bool is_not_auto_discardable =\
+      live_state_data \&\& !live_state_data->IsAutoDiscardable();\
+  OnCannotFreezeReasonChange(page_node, /*add=*/is_not_auto_discardable,\
+                             CannotFreezeReason::kOptedOut);\
+}
+}' components/performance_manager/freezing/freezing_policy.cc
+
+# === End Migaku patches ===
+
 sed -i 's/BASE_FEATURE(kExtensionManifestV2Unsupported, base::FEATURE_ENABLED_BY_DEFAULT);/BASE_FEATURE(kExtensionManifestV2Unsupported, base::FEATURE_DISABLED_BY_DEFAULT);/' extensions/common/extension_features.cc
 sed -i 's/BASE_FEATURE(kExtensionManifestV2Disabled, base::FEATURE_ENABLED_BY_DEFAULT);/BASE_FEATURE(kExtensionManifestV2Disabled, base::FEATURE_DISABLED_BY_DEFAULT);/' extensions/common/extension_features.cc
 sed -i '/feature_overrides.EnableFeature(::features::kSkipVulkanBlocklist);/d' chrome/browser/chrome_browser_field_trials.cc
