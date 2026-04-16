@@ -109,6 +109,75 @@ void FreezingPolicy::OnIsAutoDiscardableChanged(const PageNode* page_node) {\
 }
 }' components/performance_manager/freezing/freezing_policy.cc
 
+# 6. Fix CHECK crash in TabsQueryFunction::MatchesWindow (tabs_api.cc)
+#    On Android, some windows (CustomTabActivity) lack a BrowserExtensionWindowController.
+#    Convert fatal CHECK to defensive skip.
+sed -i 's|  CHECK(window_controller);|  if (!window_controller) return false;|' \
+  chrome/browser/extensions/api/tabs/tabs_api.cc
+
+# 7. Coerce extension popup windows to normal type (tabs_api.cc)
+#    Prevents chrome.windows.create({type:"popup"}) from creating CustomTabActivity.
+sed -i 's|        window_type = BrowserWindowInterface::TYPE_POPUP;|        window_type = BrowserWindowInterface::TYPE_NORMAL;|' \
+  chrome/browser/extensions/api/tabs/tabs_api.cc
+
+# 8. Redirect chrome.windows.create to open as tab in existing window (tabs_api.cc)
+#    Instead of creating a new Android Activity, reuse the current browser window.
+python3 << 'PYEOF'
+path = "chrome/browser/extensions/api/tabs/tabs_api.cc"
+with open(path) as f: src = f.read()
+
+old = """#else
+
+  CHECK(create_params.type == BrowserWindowInterface::TYPE_NORMAL ||
+        create_params.type == BrowserWindowInterface::TYPE_POPUP)
+      << "Unexpected window type: " << static_cast<int>(create_params.type);
+
+  CreateBrowserWindow(
+      std::move(create_params),
+      base::BindOnce(
+          &WindowsCreateFunction::OnBrowserWindowCreatedAsynchronously, this));
+  return RespondLater();
+#endif  // BUILDFLAG(IS_ANDROID)"""
+
+new = """#else
+
+  // Migaku: On Android, chrome.windows.create opens URLs as tabs in the
+  // existing browser window instead of creating a new Activity/Task.
+  BrowserWindowInterface* existing = nullptr;
+  for (auto* b : GetAllBrowserWindowInterfaces()) {
+    if (b->GetProfile() == window_profile) {
+      existing = b;
+      break;
+    }
+  }
+  if (existing) {
+    for (const GURL& url : urls_) {
+      NavigateParams nav_params(existing, url, ui::PAGE_TRANSITION_LINK);
+      nav_params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
+      nav_params.pwa_navigation_capturing_force_off = true;
+      Navigate(&nav_params);
+    }
+    return RespondNow(WithArguments(
+        ExtensionTabUtil::CreateWindowValueForExtension(
+            *existing, extension(), WindowController::kPopulateTabs,
+            source_context_type())));
+  }
+
+  CreateBrowserWindow(
+      std::move(create_params),
+      base::BindOnce(
+          &WindowsCreateFunction::OnBrowserWindowCreatedAsynchronously, this));
+  return RespondLater();
+#endif  // BUILDFLAG(IS_ANDROID)"""
+
+if old in src:
+    src = src.replace(old, new)
+    with open(path, "w") as f: f.write(src)
+    print("PATCHED windows.create redirect")
+else:
+    print("WARNING: windows.create marker not found, may already be patched")
+PYEOF
+
 # === End Migaku patches ===
 
 sed -i 's/BASE_FEATURE(kExtensionManifestV2Unsupported, base::FEATURE_ENABLED_BY_DEFAULT);/BASE_FEATURE(kExtensionManifestV2Unsupported, base::FEATURE_DISABLED_BY_DEFAULT);/' extensions/common/extension_features.cc
